@@ -18,7 +18,7 @@ const manager_routes = {
                 (connection, pool) => {
 
                     connection.query(
-                        `SELECT id FROM gs_manager WHERE email = ? AND password = ?`, [email, password], (err, rows, fields) => {
+                        `SELECT id FROM gs_manager WHERE email = ? AND password = ? AND disabled = 0`, [email, password], (err, rows, fields) => {
                             pool.releaseConnection(connection);
                             if(err){
                                 response.json({
@@ -233,6 +233,8 @@ const manager_routes = {
                         FROM gs_manager
                             WHERE 
                                 id = ${manager_id}
+                            AND
+                                disabled = 0
                     `,
                     (error, rows, fields) => {
 
@@ -546,6 +548,8 @@ const manager_routes = {
                         FROM 
                             gs_garage 
                                 WHERE id_gs_manager = ${manager_id}
+                            AND
+                                disabled = 0
                     `,
                     async (error, rows, fields) => {
 
@@ -652,6 +656,283 @@ const manager_routes = {
                 documents: documents
             }
         });
+    },
+
+    drop_document: (request, response) => {
+
+        const document_type = request.body.document_type ?? "";
+        const manager_id    = request.body.manager_id;
+
+        if(!manager_id){
+            response.json({
+                success: false,
+                errors: ["manager_id cannot be null"]
+            });
+            return;
+        }
+
+        if(document_type !== "identity_card" && document_type !== "drivers_license" && document_type !== "tax_id"){
+            response.json({
+                success: false,
+                errors: ["document_type must be identity_card, drivers_license or tax_id"]
+            });
+            return;
+        }
+
+        const path = `./storage/gs_manager/manager_${manager_id}/documents/${document_type}.png`;
+        if(fs.existsSync(path)){
+            try{
+                fs.unlinkSync(path);
+            }catch(e){
+                response.json({
+                    success: false,
+                    errors: [e.message]
+                });
+                return;
+            }
+        }
+
+        response.json({
+            success: true
+        });
+        
+    },
+
+    get_documents_metadata: (request, response) => {
+
+        const manager_id = request.body.manager_id;
+
+        if(!manager_id){
+            response.json({
+                success: false,
+                errors: ["manager_id cannot be null"]
+            });
+            return;
+        }        
+
+        const path = `./storage/gs_manager/manager_${manager_id}/documents`;
+        let metadata_documents = [];
+        if(fs.existsSync(path)){
+            let docs = fs.readdirSync(path);
+            docs.forEach(document => metadata_documents.push(document.split(".png").join("")));
+        }
+
+        response.json({
+            success: true,
+            data: {
+                metadata_documents: metadata_documents
+            }
+        });
+    },
+
+    create_parking_space: (request, response) => {
+
+        const garage_id             = request.body.garage_id;
+        const id                    = request.body.id;
+        const code_space            = request.body.code_space;
+        const type_space            = request.body.type_space;
+        const additional_info       = request.body.additional_info;
+        const hourly_cost           = (request.body.hourly_cost ?? "0.00").toString();
+
+        if(!garage_id){
+            response.json({
+                success: false,
+                errors: ["garage_id cannot be null"]
+            });
+            return;
+        }
+
+        if(code_space && type_space && hourly_cost){
+            
+            if(type_space == "4_wheels" || type_space == "2_wheels" || type_space == "4_2_wheels"){
+
+                if(isNaN(hourly_cost)){
+                    response.json({
+                        success: false,
+                        errors: ["hourly_cost must be a number"]
+                    });
+                    return;
+                }
+
+                if(parseFloat(hourly_cost) >= 0.50){
+
+                    let array_values = [code_space, type_space, hourly_cost, additional_info, garage_id];
+                    let query = 
+                        `
+                            INSERT INTO gs_parking_space 
+                                (
+                                    code_space,
+                                    type_space,
+                                    hourly_cost,
+                                    additional_info,
+                                    id_gs_garage
+                                )
+                            VALUES
+                                (
+                                    ?,
+                                    ?,
+                                    ?,
+                                    ?,
+                                    ?
+                                )
+                        `;
+                    if(id){
+                        array_values.push(id);
+                        query = 
+                            `
+                                UPDATE gs_parking_space SET
+                                    code_space          = ?,
+                                    type_space          = ?,
+                                    hourly_cost         = ?,
+                                    additional_info     = ?,
+                                    id_gs_garage        = ?
+                                        WHERE
+                                            id = ?
+                            `;
+                    }
+
+                    db_core.db_core.get_connection(
+                        (connection, pool) => {
+
+                            connection.query(
+                                query,
+                                array_values,
+                                (error, result, fields) => {
+
+                                    pool.releaseConnection(connection);
+
+                                    if(error){
+                                        response.json({
+                                            success: false,
+                                            errors: [error.message]
+                                        });
+                                        return;
+                                    }
+
+                                    const inserted_id = !id ? result.insertId : id;
+                                    if(inserted_id){
+                                        response.json({
+                                            success: true,
+                                            data: {
+                                                id: inserted_id
+                                            }
+                                        });
+                                    }else{
+                                        response.json({
+                                            success: false,
+                                            errors: ["insertId is null"]
+                                        });
+                                    }
+
+                                }
+                            )
+
+                        },
+                        (err) => {
+                            response.json({
+                                success: false,
+                                errors: [err.message]
+                            });
+                        }
+                    )
+
+                }else{
+                    response.json({
+                        success: false,
+                        errors: ["hourly_cost must be >= 0.50"]
+                    });
+                }
+
+            }else{
+                response.json({
+                    success: false,
+                    errors: ["type_space must be 4_wheels, 2_wheels or 4_2_wheels"]
+                });
+            }
+
+        }else{
+            response.json({
+                success: false,
+                errors: ["code_space, type_space e hourly_cost cannot be null"]
+            });
+        }
+
+    },
+
+    get_parking_spaces: (request, response) => {
+
+        const garage_id = request.body.garage_id;
+
+        if(!garage_id){
+            response.json({
+                success: false,
+                errors: ["garage_id cannot be null"]
+            });
+            return;
+        }
+
+        db_core.db_core.get_connection(
+            (connection, pool) => {
+
+                connection.query(
+                    `
+                        SELECT 
+                            id, 
+                            code_space, 
+                            type_space, 
+                            hourly_cost, 
+                            additional_info 
+                        FROM 
+                            gs_parking_space 
+                                WHERE 
+                                    id_gs_garage = ${garage_id}
+                                AND
+                                    disabled = 0
+                    `,
+                    (error, rows, fields) => {
+
+                        pool.releaseConnection(connection);
+
+                        if(error){
+                            response.json({
+                                success: false,
+                                errors: [error.message]
+                            });
+                            return;
+                        }
+
+                        let parking_spaces = [];
+                        rows.forEach(row => {
+                            parking_spaces.push(
+                                {
+                                    id              : row.id,
+                                    code_space      : row.code_space,
+                                    type_space      : row.type_space,
+                                    hourly_cost     : row.hourly_cost,
+                                    additional_info : row.additional_info
+                                }
+                            );
+                        });
+
+                        response.json({
+                            success: true,
+                            data: {
+                                parking_spaces: parking_spaces
+                            }
+                        });
+
+                    }
+                );
+
+            },
+            (error) => {
+                response.json({
+                    success: false,
+                    errors: [error.message]
+                });
+            }
+        );
+
     }
 
 };
