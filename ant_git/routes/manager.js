@@ -1,7 +1,9 @@
 const db_core = require('../core/db_core');
 const crypto  = require('crypto');
 const fs      = require('fs');
+const keys    = require('../core/project_keys');
 const uuid    = require('uuid');
+const utility = require('../core/utility_funcs_core');
 
 const manager_routes = {
 
@@ -12,13 +14,13 @@ const manager_routes = {
 
         if(email && password){
 
-            password = crypto.createHmac("sha256", "917d8e42-f8ce-41a6-9f39-8d30ef1f6d2d").update(password).digest("hex");
+            password = crypto.createHmac("sha256", keys.keys.secret_key).update(password).digest("hex");
 
             db_core.db_core.get_connection(
                 (connection, pool) => {
 
                     connection.query(
-                        `SELECT id FROM gs_manager WHERE email = ? AND password = ? AND disabled = 0`, [email, password], (err, rows, fields) => {
+                        `SELECT id, email_check FROM gs_manager WHERE email = ? AND password = ? AND disabled = 0`, [email, password], (err, rows, fields) => {
                             pool.releaseConnection(connection);
                             if(err){
                                 response.json({
@@ -30,7 +32,8 @@ const manager_routes = {
                                     response.json({
                                         success: true,
                                         data: {
-                                            id: rows[0]['id']
+                                            id: rows[0]['id'],
+                                            account_verified: rows[0].email_check
                                         }
                                     });
                                 }else{
@@ -89,28 +92,6 @@ const manager_routes = {
             errors.push("type_subject must be 1, 2");
         }
 
-        // private
-        if(type_subject == 1){
-            if(!first_name){
-                errors.push("fill first_name if you are private");
-            }
-            if(!last_name){
-                errors.push("fill last_name if you are private");
-            }
-            if(!fiscal_code){
-                errors.push("fill fiscale_code if you are private");
-            }
-        }
-
-        // business
-        if(type_subject == 2){
-            if(!business_name){
-                errors.push("fill business_name if you are business");
-            }
-            if(!vat_number){
-                errors.push("fill vat_number if you are business");
-            }
-        }
 
         if(errors.length > 0){
             response.json({
@@ -119,7 +100,7 @@ const manager_routes = {
             });
         }else{
             
-            password = crypto.createHmac("sha256", "917d8e42-f8ce-41a6-9f39-8d30ef1f6d2d").update(password).digest("hex");
+            password = crypto.createHmac("sha256", keys.keys.secret_key).update(password).digest("hex");
 
             db_core.db_core.get_connection(
                 (connection, pool) => {
@@ -337,7 +318,7 @@ const manager_routes = {
         const garage_id     = request.body.garage_id;
         const manager_id    = request.body.manager_id;
         const base64_array  = request.body.base64_array;
-        const mode          = request.body.mode;
+        const mode          = "sync";//request.body.mode;
 
         if(!garage_id || !manager_id || base64_array.length == 0 || !mode){
             response.json({
@@ -398,6 +379,8 @@ const manager_routes = {
         const latitude      = request.body.latitude;
         const longitude     = request.body.longitude;
         const manager_id    = request.body.manager_id;
+        let opened_from     = request.body.opened_from;
+        let opened_to       = request.body.opened_to;
 
         if(!title || !region || !province || !city || !cap || !address || !manager_id){
             response.json({
@@ -407,7 +390,25 @@ const manager_routes = {
             return;
         }
 
-        const array_values = [title, subtitle, info_point, region, province, city, cap, address, latitude, longitude, manager_id];
+        if(!opened_from || (opened_from && opened_from.trim() == "") ){
+            opened_from = "00:00";
+        }
+
+        if(!opened_to || (opened_to && opened_to.trim() == "") ){
+            opened_to = "23:59";
+        }
+
+        // Ottieni intervalli
+        let intervals   = [];
+        let start_from  = `0001-01-01 ${opened_from}`;
+        let end_to      = `0001-01-01 ${opened_to}`; 
+
+        if(utility.utility_funcs_core.is_smaller_date(end_to, start_from)){
+            end_to = `0001-01-02 ${opened_to}`;
+        }
+
+        intervals           = utility.utility_funcs_core.get_valid_intervals_between_two_dates(start_from, end_to);
+        const array_values  = [title, subtitle, info_point, region, province, city, cap, address, latitude, longitude, opened_from, opened_to, JSON.stringify(intervals), manager_id];
 
         let query = 
             `
@@ -423,6 +424,9 @@ const manager_routes = {
                         address,
                         latitude,
                         longitude,
+                        opened_from,
+                        opened_to,
+                        hours_intervals,
                         id_gs_manager
                     )
                 VALUES 
@@ -437,7 +441,10 @@ const manager_routes = {
                         ?,
                         ?,
                         ?,
-                        ? 
+                        ?,
+                        ?,
+                        ?,
+                        ?
                     )
             `;
         
@@ -456,6 +463,9 @@ const manager_routes = {
                         address         = ?,
                         latitude        = ?,
                         longitude       = ?,
+                        opened_from     = ?,
+                        opened_to       = ?,
+                        hours_intervals = ?,
                         id_gs_manager   = ?
                     WHERE
                         id = ?
@@ -932,6 +942,62 @@ const manager_routes = {
                 });
             }
         );
+
+    },
+
+    set_garage_close_status: (request, response) => {
+
+        const garage_id = request.body.garage_id;
+        const closed    = (request.body.closed ?? -1).toString();
+
+        if(!garage_id || !closed){
+            response.json({
+                success: false,
+                errors: ["garage_id and closed are mandatory fields"]
+            });
+            return;
+        }
+
+        if(closed !== "0" && closed !== "1"){
+            response.json({
+                success: false,
+                errors: ["closed must be 0 or 1"]
+            });
+            return;
+        }
+
+        db_core.db_core.get_connection(
+            (connection, pool) => {
+
+                connection.query(
+                    `UPDATE gs_garage SET closed = ${closed} WHERE id = ${garage_id}`,
+                    (error, result, fields) => {
+
+                        pool.releaseConnection(connection);
+
+                        if(error){
+                            response.json({
+                                success: false,
+                                errors: [error.message]
+                            });
+                            return;
+                        }
+
+                        response.json({
+                            success: true
+                        });
+
+                    }
+                );
+
+            },
+            (error) => {
+                response.json({
+                    success: false,
+                    errors: [error.message]
+                });
+            }
+        )
 
     }
 
